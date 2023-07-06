@@ -1,0 +1,15 @@
+[submodule "external/pybind11"]
+	path = external/pybind11
+	url = https://github.com/pybind/pybind11.git
+[submodule "external/thrust"]
+	path = external/thrust
+	url = https://github.com/NVIDIA/thrust.git
+[submodule "external/cuCollections"]
+	path = external/cuCollections
+	url = https://github.com/NVIDIA/cuCollections.git
+[submodule "external/warpcore"]
+	path = external/warpcore
+	url = https://github.com/sleeepyjack/warpcore.git
+[submodule "external/CPM.cmake"]
+	path = external/CPM.cmake
+	url = https://github.com/cpm-cmake/CPM.cmake.git
