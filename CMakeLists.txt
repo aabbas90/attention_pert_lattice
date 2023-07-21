@@ -10,15 +10,15 @@ set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} --expt-relaxed-constexpr --expt-extended
 include_directories(include)
 
 include(external/CPM.cmake/cmake/CPM.cmake)
-CPMAddPackage(
-  NAME cuco
-  GITHUB_REPOSITORY NVIDIA/cuCollections
-  GIT_TAG dev
-  OPTIONS
-     "BUILD_TESTS OFF"
-     "BUILD_BENCHMARKS OFF"
-     "BUILD_EXAMPLES OFF"
-)
+#CPMAddPackage(
+#  NAME cuco
+#  GITHUB_REPOSITORY NVIDIA/cuCollections
+#  GIT_TAG dev
+#  OPTIONS
+#     "BUILD_TESTS OFF"
+#     "BUILD_BENCHMARKS OFF"
+#     "BUILD_EXAMPLES OFF"
+#)
 
 add_library(ATTENTION_PERT_LATTICE INTERFACE)
 
@@ -27,7 +27,7 @@ target_compile_features(ATTENTION_PERT_LATTICE INTERFACE cxx_std_17)
 target_compile_options(ATTENTION_PERT_LATTICE INTERFACE -march=native)
 target_compile_options(ATTENTION_PERT_LATTICE INTERFACE -fPIC)
 target_include_directories(ATTENTION_PERT_LATTICE INTERFACE external/Eigen)
-target_link_libraries(ATTENTION_PERT_LATTICE INTERFACE cuco)
+# target_link_libraries(ATTENTION_PERT_LATTICE INTERFACE cuco)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
