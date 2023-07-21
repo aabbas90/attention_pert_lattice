@@ -3,11 +3,10 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -use_fast_math")
 
 cmake_minimum_required(VERSION 3.23.1 FATAL_ERROR)
 
-set(CMAKE_CUDA_ARCHITECTURES 70)
+set(CMAKE_CUDA_ARCHITECTURES native)
+# set_property(TARGET tgt PROPERTY CUDA_ARCHITECTURES native)
 set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} --expt-relaxed-constexpr --expt-extended-lambda -fmax-errors=1000")
 
-#include_directories(external/thrust/)
-#include_directories(external/thrust/dependencies/cub)
 include_directories(include)
 
 include(external/CPM.cmake/cmake/CPM.cmake)

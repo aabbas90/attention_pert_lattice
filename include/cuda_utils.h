@@ -1,11 +1,114 @@
 #pragma once
 
+#include <iomanip>
 #include <cuda_runtime.h>
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 #include <thrust/gather.h>
 #include <thrust/iterator/discard_iterator.h>
 #include <thrust/adjacent_difference.h>
+#include <thrust/iterator/constant_iterator.h>
+#include "time_measure_util.h"
+
+// struct __device_builtin__ __align__(2*sizeof(unsigned long int)) encoded_lattice_pt {
+template<int N>
+struct encoded_lattice_pt {
+    std::array<uint64_t, N> data;
+
+    static encoded_lattice_pt<N> create_empty_stencil() {
+        encoded_lattice_pt sten = encoded_lattice_pt<N>();
+        for (int i = 0; i != N; ++i)
+        {
+            sten.data[i] = ~0;
+        }
+        return sten;
+    }
+
+    __host__ __device__ encoded_lattice_pt()
+    {
+        for (int i = 0; i != N; ++i)
+            data[i] = 0;
+    }
+    
+    __host__ __device__ bool operator==(const encoded_lattice_pt& other) const
+    {
+        for (int i = 0; i != N; ++i)
+        {
+            if (data[i] != other.data[i])
+                return false;
+        }
+        return true;
+    }
+
+    // __host__ __device__ bool operator<(const encoded_lattice_pt& other) const
+    // {
+    //     for (int i = N; i > 0; i--)
+    //     {
+    //         if (data[i] != other.data[i])
+    //             return data[i] < other.data[i];
+    //     }
+    //     return data[0] < other.data[0];
+    // }
+
+    __host__ __device__ inline const uint64_t& get_portion(int& start_bit, int& end_bit) const
+    {
+        assert(end_bit > start_bit);
+        const int index = start_bit / 64;
+        assert((end_bit - 1) / 64 == index);
+        start_bit = start_bit % 64;
+        end_bit = end_bit % 64;
+        return data[index];
+    }
+
+    __host__ __device__ inline uint64_t& get_portion(int& start_bit, int& end_bit)
+    {
+        assert(end_bit > start_bit);
+        const int index = start_bit / 64;
+        assert((end_bit - 1) / 64 == index);
+        start_bit = start_bit % 64;
+        end_bit = end_bit % 64;
+        return data[index];
+    }
+
+    __host__ __device__ inline int extract_number(int start_bit, int end_bit) const
+    {
+        const uint64_t portion = get_portion(start_bit, end_bit);
+        return ((portion >> start_bit) & ((1 << end_bit - start_bit) - 1));
+    }
+
+    __host__ __device__ inline void put_number(int start_bit, int end_bit, uint64_t number)
+    {
+        uint64_t& portion = get_portion(start_bit, end_bit);
+        const uint64_t remove_mask = ~(((1 << end_bit - start_bit) - 1) << start_bit);
+        portion = (portion & remove_mask) | (number << start_bit);
+    }
+
+    __host__ __device__ inline bool increment(int start_bit, int end_bit)
+    {
+        uint64_t& portion = get_portion(start_bit, end_bit);
+        portion += ((uint64_t) 1) << start_bit;
+        if (((portion >> start_bit) & ((1 << end_bit - start_bit) - 1)) == 0) // overflow
+            return true;
+        return false;
+    }
+
+    __host__ __device__ inline bool decrement(int start_bit, int end_bit)
+    {
+        uint64_t& portion = get_portion(start_bit, end_bit);
+        if (((portion >> start_bit) & ((1 << end_bit - start_bit) - 1)) == 0) // underflow
+            return true;
+        portion -= ((uint64_t) 1) << start_bit;
+        return false;
+    }
+};
+
+template<int N>
+std::ostream& operator<<(std::ostream& o, const encoded_lattice_pt<N>& pt)
+{
+    for (int i = 0; i != N; ++i)
+        o << pt.data[i] <<", ";
+    return o;
+}
 
 inline int get_cuda_device()
 {   
@@ -39,6 +142,30 @@ inline void initialize_gpu(bool verbose = false)
     }
 }
 
+template <typename T, typename ITERATOR>
+inline thrust::device_vector<T> duplicate_by_counts(const ITERATOR values_begin, const thrust::device_vector<uint32_t>& counts)
+{
+    MEASURE_FUNCTION_EXECUTION_TIME;
+    thrust::device_vector<uint32_t> counts_sum(counts.size() + 1);
+    counts_sum[0] = 0;
+    thrust::inclusive_scan(counts.begin(), counts.end(), counts_sum.begin() + 1);
+    
+    int out_size = counts_sum.back();
+    thrust::device_vector<uint32_t> output_indices(out_size, 0);
+
+    thrust::scatter(
+        thrust::make_constant_iterator<uint32_t>(1), thrust::make_constant_iterator<uint32_t>(1) + counts.size(), 
+        counts_sum.begin(), output_indices.begin());
+
+    thrust::inclusive_scan(output_indices.begin(), output_indices.end(), output_indices.begin());
+    thrust::transform(output_indices.begin(), output_indices.end(), thrust::make_constant_iterator(1), output_indices.begin(), thrust::minus<uint32_t>());
+
+    thrust::device_vector<T> out_values(out_size);
+    thrust::gather(output_indices.begin(), output_indices.end(), values_begin, out_values.begin());
+
+    return out_values;
+}
+
 template<typename T>
 inline void print_vector(const thrust::device_vector<T>& v, const char* name, const int num = 0)
 {
@@ -69,7 +196,11 @@ inline void print_matrix(const thrust::device_vector<T>& v, const char* name, co
     auto start_location = v.begin();
     for (int r = 0; r != num_rows; r++)
     {
-        thrust::copy(start_location, start_location + num_cols, std::ostream_iterator<T>(std::cout, " "));
+        std::vector<T> row(start_location, start_location + num_cols);
+        for (auto val : row)
+            std::cout << std::setw(2) << val << " ";
+        // thrust::copy(start_location, start_location + num_cols, std::ostream_iterator<T>(std::cout, " "));
+
         start_location += num_cols;
         std::cout<<"\n";
     }
@@ -82,7 +213,11 @@ inline void print_matrix(const thrust::device_ptr<T>& v, const char* name, const
     auto start_location = v;
     for (int r = 0; r != num_rows; r++)
     {
-        thrust::copy(start_location, start_location + num_cols, std::ostream_iterator<T>(std::cout, " "));
+        std::vector<T> row(start_location, start_location + num_cols);
+        for (auto val : row)
+            std::cout << std::setw(2) << val << " ";
+
+        // thrust::copy(start_location, start_location + num_cols, std::ostream_iterator<T>(std::cout, " "));
         start_location += num_cols;
         std::cout<<"\n";
     }
@@ -113,25 +248,30 @@ __host__ __device__ inline T encode_point(
     const int* const cumulative_num_bits, const int* const min_c, const int* const rem0, const int* const ranks, 
     const int batch_index, const int start_index, const int reminder, const int d_lattice)
     {
-        T packedNumber = 0;
-        int c = 0;
-        int shift = 0;
-        for (c = 0; c != d_lattice - 1; c++)
+        T packedNumber;
+        int start_bit = 0;
+        int end_bit = cumulative_num_bits[0];
+        for (int c = 0; c != d_lattice + 1; c++)
         {
-            const int current_rank = ranks[start_index + c];
-            const int current_rem0 = rem0[start_index + c];
+            if (c < d_lattice - 1)
+            {
+                const int current_rank = ranks[start_index + c];
+                const int current_rem0 = rem0[start_index + c];
 
-            int pt_coordinate = current_rem0 + compute_canonical_simplex_point_coordinate(reminder, current_rank, d_lattice - 1);
-            if (pt_coordinate != 0)
-                pt_coordinate = floor_divisor(pt_coordinate, d_lattice);
-            pt_coordinate -= min_c[c];
-            assert(pt_coordinate >= 0);
-            // Pack the number by shifting it and combining with the packedNumber
-            packedNumber |= ((T) pt_coordinate) << shift;
-            shift = cumulative_num_bits[c];
+                int pt_coordinate = current_rem0 + compute_canonical_simplex_point_coordinate(reminder, current_rank, d_lattice - 1);
+                if (pt_coordinate != 0)
+                    pt_coordinate = floor_divisor(pt_coordinate, d_lattice);
+                pt_coordinate -= min_c[c];
+                assert(pt_coordinate >= 0);
+                packedNumber.put_number(start_bit, end_bit, pt_coordinate);
+            }
+            else if (c == d_lattice - 1)
+                packedNumber.put_number(start_bit, end_bit, reminder);
+            else
+                packedNumber.put_number(start_bit, end_bit, batch_index);
+            start_bit = end_bit;
+            end_bit = cumulative_num_bits[c + 1];
         }
-        packedNumber |= ((T) reminder) << shift;
-        packedNumber |= ((T) batch_index) << cumulative_num_bits[d_lattice - 1];
         return packedNumber;
     }
 
@@ -139,22 +279,21 @@ template<typename T>
 __host__ __device__ inline void decode_point(const int* const cumulative_num_bits, const int* const min_c,
     const int out_index_pt, const int d_lattice, const T encoded_point, int* output)
     {
-        T masked = encoded_point;
-        const int batch_index = masked >> cumulative_num_bits[d_lattice - 1]; 
-        masked = masked & ~(~0 << cumulative_num_bits[d_lattice - 1]);
+        const int batch_index = encoded_point.extract_number(cumulative_num_bits[d_lattice - 1], cumulative_num_bits[d_lattice]);
+        const int reminder = encoded_point.extract_number(cumulative_num_bits[d_lattice - 2], cumulative_num_bits[d_lattice - 1]);
         int output_index = out_index_pt * d_lattice;
         output[output_index++] = batch_index;
 
-        const int reminder = masked >> cumulative_num_bits[d_lattice - 2]; 
-        int shift = 0;
+        int start_bit = 0;
+        int end_bit = cumulative_num_bits[0];
         for (int index_d = 0; index_d != d_lattice - 1; index_d++)
         {
-            int next_shift = cumulative_num_bits[index_d];
-            int current_number = ((masked >> shift) & ((1 << next_shift - shift) - 1)) + min_c[index_d];
+            int current_number = encoded_point.extract_number(start_bit, end_bit) + min_c[index_d];
             current_number *= d_lattice;
 
             output[output_index++] = current_number + reminder;
-            shift = next_shift;
+            start_bit = end_bit;
+            end_bit = cumulative_num_bits[index_d + 1];
         }
     }
 
@@ -163,76 +302,54 @@ __host__ __device__ inline void compute_neighbour_encoding(const int* const cumu
     const int d_lattice, const T encoded_point, const int direction, T& neighbour_point_plus, T& neighbour_point_minus,
     bool& plus_overflow, bool& minus_overflow)
     {
-        // for dit in range(n_ch_1):
-        // offset = [n_ch if i == dit else -1 for i in range(n_ch)]
-        const int num_bits_reminder = cumulative_num_bits[d_lattice - 2];
-        const T cur_reminder = (encoded_point & ((1 << cumulative_num_bits[d_lattice - 1]) - 1)) >> num_bits_reminder; 
-        const T nplus_reminder = cur_reminder == 0 ? d_lattice - 1: cur_reminder - 1;
-        const T nminus_reminder = cur_reminder == d_lattice - 1 ? 0: cur_reminder + 1;
-
-        const T reminder_remove_mask = ~(cur_reminder << num_bits_reminder);
-        neighbour_point_plus = (encoded_point & reminder_remove_mask) | (nplus_reminder << num_bits_reminder);
-        neighbour_point_minus = (encoded_point & reminder_remove_mask) | (nminus_reminder << num_bits_reminder);
         plus_overflow = false;
         minus_overflow = false;
+        // for dit in range(n_ch_1):
+        // offset = [n_ch if i == dit else -1 for i in range(n_ch)]
+        const int start_bit_batch_index = cumulative_num_bits[d_lattice - 1];
+        const int start_bit_reminder = cumulative_num_bits[d_lattice - 2];
+
+        const int cur_reminder = encoded_point.extract_number(start_bit_reminder, start_bit_batch_index);
+        
+        const int nplus_reminder = cur_reminder == 0 ? d_lattice - 1: cur_reminder - 1;
+        const int nminus_reminder = cur_reminder == d_lattice - 1 ? 0: cur_reminder + 1;
+
+        neighbour_point_plus.put_number(start_bit_reminder, start_bit_batch_index, nplus_reminder);
+        neighbour_point_minus.put_number(start_bit_reminder, start_bit_batch_index, nminus_reminder);
+        
         if (cur_reminder == 0)
         {
-            int shift = 0;
+            int start_bit = 0;
+            int end_bit = cumulative_num_bits[0];
             for (int c = 0; c != d_lattice - 1; c++)
             {
-                const int next_shift = cumulative_num_bits[c];
-                const int current_number = ((encoded_point >> shift) & ((1 << next_shift - shift) - 1));
-                const T op = 1 << shift;
-                if (c == direction)
-                {
-                    minus_overflow |= current_number == 0;
-                    neighbour_point_minus -= op;
-                }
-                else
-                {
-                    plus_overflow |= current_number == 0;
-                    neighbour_point_plus -= op;
-                }
-                shift = next_shift;
+                if (c == direction) // due to -n_ch
+                    minus_overflow |= neighbour_point_minus.decrement(start_bit, end_bit);
+                else // due to -1
+                    plus_overflow |= neighbour_point_plus.decrement(start_bit, end_bit);
+                start_bit = end_bit;
+                end_bit = cumulative_num_bits[c + 1];
             }
         }
         else if (cur_reminder == d_lattice - 1)
         {
-            // [-1 3 -1] -> [0, 1, 0]
-            // [0 0 0] -> [1, 1, 1]
-            int shift = 0;
+            int start_bit = 0;
+            int end_bit = cumulative_num_bits[0];
             for (int c = 0; c != d_lattice - 1; c++)
             {
-                const int next_shift = cumulative_num_bits[c];
-                const int current_number = ((encoded_point >> shift) & ((1 << next_shift - shift) - 1));
-                const T op = 1 << shift;
                 if (c == direction)
-                {
-                    minus_overflow |= current_number == 0;
-                    neighbour_point_plus -= op;
-                }
+                    plus_overflow |= neighbour_point_plus.increment(start_bit, end_bit);
                 else
-                {
-                    minus_overflow |= current_number == next_shift - shift;
-                    neighbour_point_minus += op;
-                }
-                shift = next_shift;
+                    minus_overflow |= neighbour_point_minus.increment(start_bit, end_bit);
+                start_bit = end_bit;
+                end_bit = cumulative_num_bits[c + 1];
             }
         }
         else if(direction != d_lattice - 1)
         {
-            const int shift = direction > 0 ? cumulative_num_bits[direction - 1] : 0;
-            const int next_shift = cumulative_num_bits[direction];   
-            const int current_number = ((encoded_point >> shift) & ((1 << next_shift - shift) - 1));
-            const T op = 1 << shift;
-            plus_overflow |= current_number == next_shift - shift;
-            neighbour_point_plus += op;
-            minus_overflow |= current_number == 0;
-            neighbour_point_minus -= op;
+            const int start_bit = direction > 0 ? cumulative_num_bits[direction - 1] : 0;
+            const int end_bit = cumulative_num_bits[direction];   
+            plus_overflow |= neighbour_point_plus.increment(start_bit, end_bit);
+            minus_overflow |= neighbour_point_minus.decrement(start_bit, end_bit);
         }
-        // printf("cur_reminder: %d, nplus_reminder: %d, nminus_reminder: %d\n", 
-        //     cur_reminder, 
-        //     (neighbour_point_plus & ((1 << cumulative_num_bits[d_lattice - 1]) - 1)) >> num_bits_reminder, 
-        //     (neighbour_point_minus & ((1 << cumulative_num_bits[d_lattice - 1]) - 1)) >> num_bits_reminder);
-
     }

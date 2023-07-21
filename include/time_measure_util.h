@@ -16,6 +16,7 @@ class MeasureExecutionTime
     public:
         MeasureExecutionTime(const std::string& caller):caller(caller),begin(std::chrono::steady_clock::now()){}
         ~MeasureExecutionTime(){
+            cudaDeviceSynchronize();
             const auto duration=std::chrono::steady_clock::now()-begin;
             std::cout << "execution time for " << caller << " is "<<std::chrono::duration_cast<std::chrono::milliseconds>(duration).count()<<" ms\n";
         }
@@ -23,6 +24,10 @@ class MeasureExecutionTime
 
 #ifndef MEASURE_FUNCTION_EXECUTION_TIME
 #define MEASURE_FUNCTION_EXECUTION_TIME const MeasureExecutionTime measureExecutionTime(__FUNCTION__);
+#endif
+
+#ifndef MEASURE_FUNCTION_EXECUTION_TIME2
+#define MEASURE_FUNCTION_EXECUTION_TIME2(TIME_ELAPSED_IDENTIFIER) const MeasureExecutionTime measureExecutionTime(TIME_ELAPSED_IDENTIFIER);
 #endif
 
 class time_elapse_aggregator
@@ -57,6 +62,7 @@ class measure_cumulative_execution_time
 
         ~measure_cumulative_execution_time()
         {
+            cudaDeviceSynchronize();
             const auto duration = std::chrono::steady_clock::now()-begin;
             time_elapsed.duration += duration; 
         }

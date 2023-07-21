@@ -1,6 +1,8 @@
 #include <vector>
 #include <thrust/device_vector.h>
 #include <map>
+#include <numeric>
+#include <algorithm>
 #include "hashtable_lattice.h"
 #include "cuda_utils.h"
 
@@ -29,73 +31,89 @@ void check_rows(const std::vector<int>& reference, const std::vector<int>& compu
     }
 }
 
-bool check_blur_neighbours(const thrust::device_vector<KEY_TYPE>& keys_d, const thrust::device_vector<VALUE_TYPE>& values_d, 
-    const thrust::device_vector<int>& blur_neighbours_d, const std::vector<int>& cumulative_num_bits, 
-    const std::vector<int>& min_coordinate, const int d_pos, const bool is_positive_direction)
+void check_blur_neighbours(const thrust::device_vector<int>& lattice_points, const thrust::device_vector<int>& blur_nd, const int d_lattice, const bool is_positive)
 {
     auto print_vector = [](const std::vector<int>& vec, const char* name) {
         std::cout<<name<<": ";
         for (const auto& element : vec) {
-            std::cout << element << " ";
+            std::cout << std::setw(2) << element << " ";
         }
         std::cout << std::endl;
     };
-    bool failed = false;
-    const int num_pts = keys_d.size();
-    std::vector<KEY_TYPE> keys(keys_d.begin(), keys_d.end());
-    std::vector<VALUE_TYPE> values(values_d.begin(), values_d.end());
 
-    std::map<KEY_TYPE, VALUE_TYPE> map;
-    std::map<VALUE_TYPE, KEY_TYPE> map_inverse;
-    for(int i = 0; i != num_pts; ++i)
-    {
-        map.emplace(keys[i], values[i]);
-        if (values[i] < num_pts)
-            map_inverse.emplace(values[i], keys[i]);
-    }
-
-    std::vector<int> blur_neighbours(blur_neighbours_d.begin(), blur_neighbours_d.end());
-    auto add_vectors = [] (std::vector<int> v1, std::vector<int> v2)
-    {
-        assert (v1.size() == v2.size());
-        std::vector<int> v3(v1.size());
-        std::transform(v1.begin(), v1.end(), v2.begin(), v3.begin(), std::plus<int>());
-        return v3;
-    };
-    for (auto const& [encoded_point, self_index]: map)
-    {
-        std::vector<int> self_point(d_pos + 1);
-        decode_point(cumulative_num_bits.data(), min_coordinate.data(), 0, d_pos + 1, encoded_point, self_point.data());
-        for(int direction = 0; direction < d_pos + 1; direction++)
+    auto print_matrix = [] (const std::vector<int>& v, const char* name, const int num_cols) {
+        std::cout<<name<<":\n";
+        const int num_rows = v.size() / num_cols;
+        auto start_location = v.begin();
+        for (int r = 0; r != num_rows; r++)
         {
-            const int neighbour_index = blur_neighbours[direction * num_pts + self_index];
-            if (neighbour_index >= num_pts) // neighbour not present.
-                continue;
-            std::vector<int> req_offset(d_pos + 1, is_positive_direction ? -1 : 1);
-            req_offset[0] = 0; // batch index.
-            req_offset[direction + 1] = is_positive_direction ? d_pos : -d_pos;
-            std::vector<int> req_neighbour = add_vectors(self_point, req_offset);
+            std::vector<int> row(start_location, start_location + num_cols);
+            for (auto val : row)
+                std::cout << std::setw(2) << val << " ";
+            // thrust::copy(start_location, start_location + num_cols, std::ostream_iterator<T>(std::cout, " "));
 
-            KEY_TYPE neighbour_encoded = map_inverse[neighbour_index];
-            std::vector<int> neighbour_point(d_pos + 1);
-            decode_point(cumulative_num_bits.data(), min_coordinate.data(), 0, d_pos + 1, neighbour_encoded, neighbour_point.data());
-            std::vector<int> computed_offset(d_pos + 1);
-            std::transform(neighbour_point.begin(), neighbour_point.end(), self_point.begin(), computed_offset.begin(), std::minus<int>());
-            if (computed_offset != req_offset)
+            start_location += num_cols;
+            std::cout<<"\n";
+        }
+    };
+    auto get_point = [=](const int pt_index) -> std::vector<int>
+    {
+        std::vector<int> pt_wo_last_coordinate(lattice_points.begin() + pt_index * d_lattice, 
+                                lattice_points.begin() + (pt_index + 1) * d_lattice);
+        const int sum = std::accumulate(pt_wo_last_coordinate.begin() + 1, pt_wo_last_coordinate.end(), 0);
+        pt_wo_last_coordinate.push_back(-sum); // insert last coordinate.
+        return pt_wo_last_coordinate;
+    };
+
+    auto check_neighbour = [=](const std::vector<int> i, std::vector<int> j) -> std::tuple<bool, int>
+    {
+        std::vector<int> diff(i.size());
+        std::transform(i.begin(), i.end(), j.begin(), diff.begin(), std::minus<int>());
+        if (diff[0] != 0)
+            return {false, 0};
+        int direction = diff.size();
+        const int required_offset_1 = is_positive ? -1: 1;
+        const int required_offset_d = is_positive ? d_lattice - 1: -d_lattice + 1;
+        for (int d = 1; d != diff.size(); ++d)
+        {
+            if (diff[d] != required_offset_1 && diff[d] != required_offset_d)
+                return {false, d};
+            else if (diff[d] == required_offset_d)
+                direction = d;
+        }
+        return {true, direction - 1};
+    };
+
+    const int num_pts = lattice_points.size() / d_lattice;
+    std::vector<int> expected_blur_neighbours(d_lattice * num_pts, num_pts);
+    for (int i = 0; i != num_pts; ++i)
+    {
+        std::vector<int> pt_i = get_point(i);
+        for (int j = 0; j != num_pts; ++j)
+        {
+            if (i == j)
+                continue;
+            std::vector<int> pt_j = get_point(j);
+            bool is_neighbour;
+            int index;
+            std::tie(is_neighbour, index) = check_neighbour(pt_i, pt_j);
+            if(is_neighbour)
             {
-                std::cout<<"\n";
-                std::cout<<"index: "<<self_index<<", direction: "<<direction<<", neighbour_index: "<<neighbour_index<<"\n";
-                std::cout<<"self_encoded: "<<encoded_point<<"\n";
-                std::cout<<"neighbour_encoded: "<<neighbour_encoded<<"\n";
-                print_vector(self_point, "self_point");
-                print_vector(neighbour_point, "neighbour_point");
-                print_vector(req_offset, "required_offset");
-                print_vector(computed_offset, "computed_offset");
-                failed = true;
+                const int output_index = index * num_pts + i;
+                expected_blur_neighbours[output_index] = j;
+                // std::cout<<"Expected neighbours: "<<i<<" "<<j<<"\n";
+                // print_vector(pt_i, "\t pt_i");
+                // print_vector(pt_j, "\t pt_j");
             }
         }
     }
-    return failed;
+    std::vector<int> blur_h(blur_nd.begin(), blur_nd.end());
+    if (!std::equal(blur_h.begin(), blur_h.end(), expected_blur_neighbours.begin()))
+    {
+        print_matrix(expected_blur_neighbours, "expected_blur_neighbours", num_pts);
+        print_matrix(blur_h, "computed_blur_neighbours", num_pts);
+        std::cout<<"\n";
+    }
 }
 
 int main(int argc, char** argv)
@@ -138,13 +156,21 @@ int main(int argc, char** argv)
         1,  2,  2, -2,  
         1,  0,  0,  0};
 
-    hashtable_lattice htl(batch_size, num_positions, d_pos, rem0.data(), ranks.data());
+    thrust::device_vector<int> min_coordinate_per_pos, cumulative_num_bits_per_dim;
+    std::tie(min_coordinate_per_pos, cumulative_num_bits_per_dim) = calculate_lattice_extents(batch_size, num_positions, d_pos, rem0.data(), ranks.data());
+    print_vector(min_coordinate_per_pos, "min_coordinate_per_pos");
+    print_vector(cumulative_num_bits_per_dim, "cumulative_num_bits_per_dim");
+    hashtable_lattice<1> htl(batch_size, num_positions, d_pos, min_coordinate_per_pos, cumulative_num_bits_per_dim);
+    htl.add_points_to_lattice(rem0.data(), ranks.data());
+    htl.make_values_contiguous();
     {
         const auto out = htl.get_valid_lattice_points_and_indices();
         thrust::device_vector<int> lattice_points = std::get<0>(out);
         std::vector<int> lattice_points_computed_h(lattice_points.begin(), lattice_points.end());
-        thrust::device_vector<int> indices = std::get<1>(out);
+        thrust::device_vector<encoded_lattice_pt<1>> encoded_pts = std::get<1>(out);
+        thrust::device_vector<int> indices = std::get<2>(out);
         print_matrix(lattice_points, "lattice_points", d_pos + 1);
+        print_matrix(encoded_pts, "encoded_pts", 1);
         print_vector(indices, "indices");
         std::cout<<"Checking which computed key is not in reference.\n";
         check_rows(lattice_points_h, lattice_points_computed_h, d_pos + 1);
@@ -153,32 +179,48 @@ int main(int argc, char** argv)
 
         // std::vector<int> lattice_pts_exhaustive = htl.compute_all_lattice_points_slow(rem0.data(), ranks.data());    
         // check_rows(lattice_points_h, lattice_pts_exhaustive, d_pos + 1);
-    }
 
-    // {
-    //     thrust::device_vector<VALUE_TYPE> splatting_indices(batch_size * num_positions * (d_pos + 1));
-    //     htl.get_splatting_indices(rem0.data(), ranks.data(), splatting_indices.data());
-    //     print_matrix(splatting_indices, "splatting_indices", d_pos + 1);
-    // }
-    {
-        thrust::device_vector<VALUE_TYPE> blur_n1((d_pos + 1) * htl.get_hashtable_size());
-        thrust::device_vector<VALUE_TYPE> blur_n2((d_pos + 1) * htl.get_hashtable_size());
+        thrust::device_vector<VALUE_TYPE> splatting_indices(batch_size * num_positions * (d_pos + 1));
+        htl.get_splatting_indices(rem0.data(), ranks.data(), splatting_indices.data());
+        thrust::device_vector<VALUE_TYPE> blur_n1((d_pos + 1) * htl.get_num_lattice_points());
+        thrust::device_vector<VALUE_TYPE> blur_n2((d_pos + 1) * htl.get_num_lattice_points());
         htl.compute_blur_neighbours(blur_n1.data(), blur_n2.data());
-        thrust::device_vector<KEY_TYPE> keys;
+        // htl.compute_blur_neighbours_direct(rem0.data(), ranks.data(), splatting_indices.data(), blur_n1.data(), blur_n2.data());
+        // print_matrix(splatting_indices, "splatting_indices", d_pos + 1);
+        // print_matrix(blur_n1, "blur_n1", htl.get_num_lattice_points());
+        // print_matrix(blur_n2, "blur_n2", htl.get_num_lattice_points());
+        thrust::device_vector<encoded_lattice_pt<1>> keys;
         thrust::device_vector<VALUE_TYPE> values;
         std::tie(keys, values) = htl.get_hashtable_entries();
         std::vector<int> cumulative_num_bits = htl.get_cumulative_num_bits();
         std::vector<int> min_coordinate = htl.get_min_coordinate_per_pos();
-        if(check_blur_neighbours(keys, values, blur_n1, cumulative_num_bits, min_coordinate, d_pos, true))
-            std::cout<<"\tBlur neighbour test in positive direction failed.\n";
-        if(check_blur_neighbours(keys, values, blur_n2, cumulative_num_bits, min_coordinate, d_pos, false))
-            std::cout<<"\tBlur neighbour test in negative direction failed.\n";
+        check_blur_neighbours(lattice_points, blur_n2, d_pos + 1, true);
+        check_blur_neighbours(lattice_points, blur_n1, d_pos + 1, false);
+    }
+    {
+        thrust::device_vector<VALUE_TYPE> splatting_indices_direct(batch_size * num_positions * (d_pos + 1));
+        hashtable_lattice<1> htl(batch_size, num_positions, d_pos, min_coordinate_per_pos, cumulative_num_bits_per_dim);
+        htl.get_splatting_indices_direct(rem0.data(), ranks.data(), splatting_indices_direct.data());
+        print_matrix(splatting_indices_direct, "splatting_indices_direct", d_pos + 1);
+        // std::vector<int> lattice_pts_exhaustive = htl.compute_all_lattice_points_slow(rem0.data(), ranks.data());
+        // auto print_std_vector = [](const std::vector<int>& vec, const char* name) {
+        //     std::cout<<name<<": ";
+        //     for (const auto& element : vec) 
+        //     {
+        //         std::cout << element << " ";
+        //     }
+        //     std::cout << std::endl;
+        // };
+        // print_std_vector(lattice_pts_exhaustive, "lattice_pts_exhaustive");
+
+    //     // check_rows(lattice_points_h, lattice_pts_exhaustive, d_pos + 1);
+
     }
     // const std::vector<int> cumulative_num_bits_host = htl.get_cumulative_num_bits();
 
-    // KEY_TYPE neighbour_point_plus, neighbour_point_minus;
+    // encoded_lattice_pt<1> neighbour_point_plus, neighbour_point_minus;
     // bool plus_overflow, minus_overflow;
-    // const KEY_TYPE encoded_point = 69;
+    // const encoded_lattice_pt<1> encoded_point = 69;
     // for (int direction = 2; direction != 3; direction++)
     // {
     //     compute_neighbour_encoding(cumulative_num_bits_host.data(), d_pos + 1, encoded_point, direction, neighbour_point_plus, neighbour_point_minus, plus_overflow, minus_overflow);
